@@ -1010,21 +1010,23 @@ let apiKey = '', apiModel = 'gemini-2.5-flash';
 let speaking = false, activeHl = null;
 let hlItems = [], hlIdx = 0, qsOn = false, wordTarget = 0;
 let diffOriginal = '';
+let preHighlightHTML = null; // snapshot of editor.innerHTML before any highlights applied
 const cache = new Map(), pHistory = [];
 const isMob = () => window.innerWidth < 768;
 
-/* ── Undo / Redo ── */
+/* ── Undo / Redo — stores innerHTML snapshots ── */
 const undoStack = [''], redoStack = [];
 let histPaused = false, histTimer;
 
 function pushHist() {
   if (histPaused) return;
+  if (preHighlightHTML !== null) return; // don't capture highlighted state in history
   clearTimeout(histTimer);
   histTimer = setTimeout(() => {
-    const t = getPlain();
-    if (undoStack[undoStack.length-1] === t) return;
-    undoStack.push(t);
-    if (undoStack.length > 120) undoStack.shift();
+    const snap = editor.innerHTML;
+    if (undoStack[undoStack.length-1] === snap) return;
+    undoStack.push(snap);
+    if (undoStack.length > 80) undoStack.shift();
     redoStack.length = 0;
     syncUndoBtns();
   }, 350);
@@ -1039,17 +1041,21 @@ function doUndo() {
   if (undoStack.length <= 1) return;
   redoStack.push(undoStack.pop());
   histPaused = true;
-  editor.textContent = undoStack[undoStack.length-1] ?? '';
+  editor.innerHTML = undoStack[undoStack.length-1] ?? '';
   histPaused = false;
-  clearHl(true); updateStats(); syncUndoBtns();
+  preHighlightHTML = null;
+  hlItems=[]; hlIdx=0; hlPill.classList.remove('on'); applyAllB.classList.remove('on'); sugNav.classList.remove('on');
+  hideTT(); updateStats(); syncUndoBtns();
   setStatus('Undone.');
 }
 function doRedo() {
   if (!redoStack.length) return;
   const next = redoStack.pop();
   undoStack.push(next);
-  histPaused = true; editor.textContent = next; histPaused = false;
-  clearHl(true); updateStats(); syncUndoBtns();
+  histPaused = true; editor.innerHTML = next; histPaused = false;
+  preHighlightHTML = null;
+  hlItems=[]; hlIdx=0; hlPill.classList.remove('on'); applyAllB.classList.remove('on'); sugNav.classList.remove('on');
+  hideTT(); updateStats(); syncUndoBtns();
   setStatus('Redone.');
 }
 
@@ -1071,6 +1077,26 @@ function getPlain() {
     return BLOCK.has(node.nodeName) ? text + '\n\n' : text;
   }
   return walk(editor).replace(/\n{3,}/g, '\n\n').replace(/^\n+|\n+$/g, '');
+}
+
+/* Convert plain text (from AI rewrites) back to structured HTML */
+function plainToHtml(text) {
+  const paras = text.split(/
+
++/).filter(p => p.trim());
+  if (!paras.length) return '';
+  return paras.map(p => {
+    const t = p.trim();
+    if (!t) return '';
+    // Lines that look like headings: short, no ending punctuation, starts with capital
+    const lines = t.split(/
+/).filter(l => l.trim());
+    if (lines.length === 1 && t.length <= 80 && !/[.!?,;]$/.test(t) && /^[A-Z]/.test(t) && t.split(/\s+/).length <= 12) {
+      return `<h2>${escHtml(t)}</h2>`;
+    }
+    // Multi-line paragraph: join lines as a single <p>
+    return `<p>${escHtml(lines.join(' '))}</p>`;
+  }).join('');
 }
 
 function setStatus(msg, busy = false) {
@@ -1292,6 +1318,9 @@ function btnLoad(deskId, mobId, on) {
    HIGHLIGHTS
 ══════════════════════════════════ */
 function applyHighlights(items) {
+  // Snapshot the current structured HTML so clearHl can restore it fully
+  preHighlightHTML = editor.innerHTML;
+
   const text=getPlain();const matched=[];let from=0;
   for(const it of items){if(!it?.original||typeof it.original!=='string')continue;const idx=text.indexOf(it.original,from);if(idx!==-1){matched.push({...it,index:idx});from=idx+it.original.length;}}
   matched.sort((a,b)=>a.index-b.index);
@@ -1303,17 +1332,33 @@ function applyHighlights(items) {
 function updateNavCt(){navCt.textContent=`${hlIdx+1}/${hlItems.length}`;getPB().querySelectorAll('.sug').forEach((s,i)=>s.classList.toggle('active-sug',i===hlIdx));const ac=getPB().querySelector('.active-sug');if(ac)ac.scrollIntoView({behavior:'smooth',block:'nearest'});}
 function navTo(idx){const spans=[...editor.querySelectorAll('.hl')];if(!spans.length)return;hlIdx=Math.max(0,Math.min(idx,spans.length-1));updateNavCt();const sp=spans[hlIdx];sp.scrollIntoView({behavior:'smooth',block:'center'});showTT(sp);sp.classList.remove('pulse');requestAnimationFrame(()=>sp.classList.add('pulse'));}
 function clearHl(silent=false) {
-  // Remove only highlight/find spans — preserve all other HTML structure
-  editor.querySelectorAll('.hl, .fr-match').forEach(sp => {
-    sp.replaceWith(document.createTextNode(sp.textContent));
-  });
-  editor.normalize();
+  if (preHighlightHTML !== null) {
+    // Restore the full structured HTML from before highlights were applied
+    editor.innerHTML = preHighlightHTML;
+    preHighlightHTML = null;
+  } else {
+    // No snapshot — just remove any residual highlight/find spans
+    editor.querySelectorAll('.hl, .fr-match').forEach(sp => {
+      sp.replaceWith(document.createTextNode(sp.textContent));
+    });
+    editor.normalize();
+  }
   hlItems=[]; hlIdx=0;
   hlPill.classList.remove('on'); applyAllB.classList.remove('on'); sugNav.classList.remove('on');
   hideTT();
   if(!silent) setStatus('Ready to forge.');
 }
-function applyAllHl(){editor.querySelectorAll('.hl').forEach(sp=>sp.replaceWith(document.createTextNode(sp.dataset.sug||sp.textContent)));editor.normalize();hlItems=[];hlIdx=0;hlPill.classList.remove('on');applyAllB.classList.remove('on');sugNav.classList.remove('on');hideTT();updateStats();toast('✓ All suggestions applied');successPanel('Applied','✓','✅','All Applied','Every suggestion has been applied.','var(--c-fact)');}
+function applyAllHl(){
+  editor.querySelectorAll('.hl').forEach(sp=>sp.replaceWith(document.createTextNode(sp.dataset.sug||sp.textContent)));
+  editor.normalize();
+  preHighlightHTML = null; // applied changes - new state is canonical
+  hlItems=[];hlIdx=0;
+  hlPill.classList.remove('on');applyAllB.classList.remove('on');sugNav.classList.remove('on');
+  hideTT();updateStats();
+  undoStack.push(editor.innerHTML); syncUndoBtns();
+  toast('✓ All suggestions applied');
+  successPanel('Applied','✓','✅','All Applied','Every suggestion has been applied.','var(--c-fact)');
+}
 window.focusHl=function(orig,idx){const spans=[...editor.querySelectorAll('.hl')];const i=idx!==undefined?idx:spans.findIndex(s=>s.dataset.orig===orig);if(i!==-1)navTo(i);};
 window.applyAllHl=applyAllHl;
 
@@ -1355,13 +1400,64 @@ function renderDiff(ops){
 ══════════════════════════════════ */
 let frMatches=[], frIdx=0;
 function frRegex(){const raw=document.getElementById('fr-find').value;if(!raw)return null;const isRe=document.getElementById('fr-regex').checked,isCase=document.getElementById('fr-case').checked,isWhole=document.getElementById('fr-whole').checked;try{let p=isRe?raw:raw.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');if(isWhole)p=`\\b${p}\\b`;return new RegExp(p,isCase?'g':'gi');}catch{return null;}}
-function frHighlight(){editor.querySelectorAll('.fr-match').forEach(el=>el.replaceWith(document.createTextNode(el.textContent)));editor.normalize();frMatches=[];const re=frRegex();if(!re){document.getElementById('fr-status').textContent='';return;}const text=getPlain();const spans=[];let m;re.lastIndex=0;while((m=re.exec(text))!==null){spans.push({index:m.index,length:m[0].length,text:m[0]});if(spans.length>500)break;}if(!spans.length){document.getElementById('fr-status').textContent='No matches.';return;}let html='',last=0;spans.forEach((s,i)=>{html+=esc(text.slice(last,s.index));html+=`<span class="fr-match${i===frIdx?' fr-cur':''}" data-fri="${i}">${esc(s.text)}</span>`;last=s.index+s.length;});html+=esc(text.slice(last));editor.innerHTML=html;frMatches=spans;document.getElementById('fr-status').textContent=`${spans.length} match${spans.length!==1?'es':''}`;frScrollCur();}
+function frHighlight(){
+  // Restore previous snapshot before re-highlighting (handles repeated searches)
+  if(preHighlightHTML!==null){editor.innerHTML=preHighlightHTML;}
+  else{editor.querySelectorAll('.fr-match').forEach(el=>el.replaceWith(document.createTextNode(el.textContent)));editor.normalize();}
+  frMatches=[];
+  const re=frRegex();
+  if(!re){document.getElementById('fr-status').textContent='';return;}
+  // Snapshot AFTER restore, before applying find marks
+  preHighlightHTML=editor.innerHTML;
+  const text=getPlain();const spans=[];let m;re.lastIndex=0;
+  while((m=re.exec(text))!==null){spans.push({index:m.index,length:m[0].length,text:m[0]});if(spans.length>500)break;}
+  if(!spans.length){document.getElementById('fr-status').textContent='No matches.';return;}
+  let html='',last=0;
+  spans.forEach((s,i)=>{html+=esc(text.slice(last,s.index));html+=`<span class="fr-match${i===frIdx?' fr-cur':''}" data-fri="${i}">${esc(s.text)}</span>`;last=s.index+s.length;});
+  html+=esc(text.slice(last));editor.innerHTML=html;frMatches=spans;
+  document.getElementById('fr-status').textContent=`${spans.length} match${spans.length!==1?'es':''}`;frScrollCur();
+}
 function frScrollCur(){const cur=editor.querySelector('.fr-cur');if(cur)cur.scrollIntoView({behavior:'smooth',block:'center'});}
 function frNav(dir){if(!frMatches.length)return;frIdx=(frIdx+dir+frMatches.length)%frMatches.length;editor.querySelectorAll('.fr-match').forEach((el,i)=>{el.classList.toggle('fr-cur',i===frIdx);});document.getElementById('fr-status').textContent=`${frIdx+1} of ${frMatches.length}`;frScrollCur();}
 function frRepOne(){const cur=editor.querySelector('.fr-cur');if(!cur)return;const rep=document.getElementById('fr-rep').value;cur.replaceWith(document.createTextNode(rep));editor.normalize();frHighlight();updateStats();pushHist();}
-function frRepAll(){const re=frRegex();if(!re)return;const rep=document.getElementById('fr-rep').value;const text=getPlain();const count=(text.match(re)||[]).length;clearHl(true);editor.textContent=text.replace(re,rep);editor.normalize();frMatches=[];updateStats();pushHist();document.getElementById('fr-status').textContent=`Replaced ${count} match${count!==1?'es':''}`;toast(`✓ Replaced ${count}`);}
+function frRepAll(){
+  const re=frRegex();if(!re)return;
+  const rep=document.getElementById('fr-rep').value;
+  // Restore clean HTML first, then do plain-text replacement
+  const base = preHighlightHTML !== null ? preHighlightHTML : editor.innerHTML;
+  const text = getPlain();
+  const count=(text.match(re)||[]).length;
+  if(!count){toast('No matches found');return;}
+  // Build a temp div with clean content, replace text in it
+  const tmp = document.createElement('div');
+  tmp.innerHTML = base;
+  // Walk text nodes and do replacement
+  const walker = document.createTreeWalker(tmp, NodeFilter.SHOW_TEXT);
+  const toReplace = [];
+  let node;
+  while((node=walker.nextNode())){
+    if(re.test(node.textContent)) toReplace.push(node);
+    re.lastIndex=0;
+  }
+  toReplace.forEach(n => { n.textContent = n.textContent.replace(re, rep); re.lastIndex=0; });
+  editor.innerHTML = tmp.innerHTML;
+  preHighlightHTML = null; frMatches=[];
+  updateStats(); undoStack.push(editor.innerHTML); syncUndoBtns();
+  document.getElementById('fr-status').textContent=`Replaced ${count} match${count!==1?'es':''}`;
+  toast(`✓ Replaced ${count}`);
+}
 function openFR(){document.getElementById('fr-modal').classList.add('on');document.getElementById('fr-find').focus();}
-function closeFR(){document.getElementById('fr-modal').classList.remove('on');editor.querySelectorAll('.fr-match').forEach(el=>el.replaceWith(document.createTextNode(el.textContent)));editor.normalize();frMatches=[];}
+function closeFR(){
+  document.getElementById('fr-modal').classList.remove('on');
+  if(preHighlightHTML!==null){
+    editor.innerHTML=preHighlightHTML;
+    preHighlightHTML=null;
+  } else {
+    editor.querySelectorAll('.fr-match').forEach(el=>el.replaceWith(document.createTextNode(el.textContent)));
+    editor.normalize();
+  }
+  frMatches=[];
+}
 
 /* ══════════════════════════════════
    WORD TARGET
@@ -1428,7 +1524,7 @@ function buildDocXml(){
 function buildStylesXml(){return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Open Sans" w:hAnsi="Open Sans" w:cs="Open Sans"/><w:sz w:val="24"/><w:szCs w:val="24"/><w:color w:val="000000"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/><w:jc w:val="both"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Open Sans" w:hAnsi="Open Sans" w:cs="Open Sans"/><w:sz w:val="24"/><w:szCs w:val="24"/><w:color w:val="000000"/></w:rPr></w:style></w:styles>`;}
 
 async function exportDocx(){
-  if(!editor.textContent.trim()){toast('Editor is empty');return;}
+  if(!editor.innerHTML.trim()||!getPlain().trim()){toast('Editor is empty');return;}
   if(typeof JSZip==='undefined'){toast('JSZip not loaded — check your connection');return;}
   setStatus('Generating .docx…',true);
   try{
@@ -1508,7 +1604,12 @@ function showTones(){const tones=[{n:'Formal',e:'👔',d:'Professional & authori
 window._doTone=async function(tone){
   const text=getPlain().trim();if(!text)return;diffOriginal=text;
   btnLoad('t-tone','m-tone',true);streamPanel('Rewriting…','🎨','var(--c-tone)');setStatus(`Rewriting in ${tone} tone…`,true);
-  try{const r=await callGemini(text.slice(0,13000),`Rewrite in a ${tone} tone. Preserve all factual content. Return ONLY the rewritten text.`);clearHl(true);editor.textContent=r;updateStats();cache.clear();undoStack.push(r);syncUndoBtns();const ops=wordDiff(diffOriginal,r);openPanel('Tone Updated','🎨',renderDiff(ops),'var(--c-tone)');setStatus('Done.');toast(`✓ ${tone} tone — diff shown`);}
+  try{const r=await callGemini(text.slice(0,13000),`Rewrite in a ${tone} tone. Preserve all factual content. Return ONLY the rewritten text.`);
+  clearHl(true);
+  editor.innerHTML = plainToHtml(r);
+  updateStats();cache.clear();
+  undoStack.push(editor.innerHTML);syncUndoBtns();
+  const ops=wordDiff(diffOriginal,r);openPanel('Tone Updated','🎨',renderDiff(ops),'var(--c-tone)');setStatus('Done.');toast(`✓ ${tone} tone — diff shown`);}
   catch(e){openPanel('Error','!',`<div class="pc"><p style="color:var(--c-review)">${esc(e.message)}</p></div>`,'var(--c-tone)');setStatus('Error: '+e.message);}
   finally{btnLoad('t-tone','m-tone',false);}
 };
@@ -1516,7 +1617,12 @@ window._doTone=async function(tone){
 async function doHumanize(){
   const text=getPlain().trim();if(!text)return;diffOriginal=text;
   btnLoad('t-human','m-human',true);streamPanel('Humanizing…','🧬','var(--c-human)');setStatus('Humanizing…',true);
-  try{const r=await callGemini(text.slice(0,13000),`Rewrite to sound like a skilled human writer — not AI. Mix short punchy sentences with long flowing ones. Natural connectives. Concrete details. Contractions. Occasional rhetorical questions. Start some sentences with conjunctions. Return ONLY the rewritten text.`);clearHl(true);editor.textContent=r;updateStats();cache.clear();undoStack.push(r);syncUndoBtns();const ops=wordDiff(diffOriginal,r);openPanel('Humanized','🧬',renderDiff(ops),'var(--c-human)');setStatus('Humanized.');toast('✓ Humanized — diff shown');}
+  try{const r=await callGemini(text.slice(0,13000),`Rewrite to sound like a skilled human writer — not AI. Mix short punchy sentences with long flowing ones. Natural connectives. Concrete details. Contractions. Occasional rhetorical questions. Start some sentences with conjunctions. Return ONLY the rewritten text.`);
+  clearHl(true);
+  editor.innerHTML = plainToHtml(r);
+  updateStats();cache.clear();
+  undoStack.push(editor.innerHTML);syncUndoBtns();
+  const ops=wordDiff(diffOriginal,r);openPanel('Humanized','🧬',renderDiff(ops),'var(--c-human)');setStatus('Humanized.');toast('✓ Humanized — diff shown');}
   catch(e){openPanel('Error','!',`<div class="pc"><p style="color:var(--c-review)">${esc(e.message)}</p></div>`,'var(--c-human)');setStatus('Error: '+e.message);}
   finally{btnLoad('t-human','m-human',false);}
 }
@@ -1727,14 +1833,22 @@ async function handleFile(file) {
     // Inject structured HTML into editor
     clearHl(true);
     editor.innerHTML = html;
+    preHighlightHTML = null; // fresh document, no highlight snapshot
     updateStats();
     cache.clear();
-    undoStack.push(html);
+    // Seed undo stack with the loaded HTML (replaces any prior state)
+    undoStack.length = 0;
+    undoStack.push('');
+    undoStack.push(editor.innerHTML);
     syncUndoBtns();
     setP(100);
     setTimeout(() => { fp.classList.remove('on'); setP(0); }, 600);
     setStatus(`✓ Loaded: ${file.name}`);
     toast(`✓ ${file.name}`);
+    // Reset file inputs so same file can be re-selected
+    document.getElementById('fin').value = '';
+    const mfin = document.getElementById('mfin');
+    if (mfin) mfin.value = '';
 
   } catch (err) {
     fp.classList.remove('on'); setP(0);
