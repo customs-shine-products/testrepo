@@ -291,10 +291,26 @@ body {
   max-width:780px; margin:0 auto; min-height:100%;
   font-family:'Crimson Pro',Georgia,serif;
   font-size:19px; line-height:1.95; color:var(--t1);
-  white-space:pre-wrap; word-wrap:break-word;
+  word-wrap:break-word; overflow-wrap:break-word;
   outline:none; caret-color:var(--cyan); letter-spacing:.01em;
 }
 #editor:empty::before { content:attr(data-placeholder); color:var(--t4); pointer-events:none; font-style:italic; font-size:18px }
+/* Rich content styles — used when DOCX/PDF imported as structured HTML */
+#editor p   { margin:0 0 0.9em; }
+#editor p:last-child { margin-bottom:0 }
+#editor h1  { font-family:'Sora',sans-serif; font-size:26px; font-weight:700; line-height:1.3; margin:1.4em 0 0.5em; color:var(--t1) }
+#editor h2  { font-family:'Sora',sans-serif; font-size:22px; font-weight:600; line-height:1.35; margin:1.2em 0 0.45em; color:var(--t1) }
+#editor h3  { font-family:'Sora',sans-serif; font-size:19px; font-weight:600; line-height:1.4; margin:1em 0 0.4em; color:var(--t1) }
+#editor h4  { font-family:'Sora',sans-serif; font-size:17px; font-weight:600; margin:0.9em 0 0.35em; color:var(--t1) }
+#editor strong, #editor b { font-weight:700; color:var(--t1) }
+#editor em, #editor i     { font-style:italic }
+#editor ul  { padding-left:1.6em; margin:0.3em 0 0.9em }
+#editor ol  { padding-left:1.6em; margin:0.3em 0 0.9em }
+#editor li  { margin-bottom:0.35em; line-height:1.75 }
+#editor blockquote { border-left:3px solid var(--cyan); padding:6px 14px; margin:0.8em 0; color:var(--t2); font-style:italic }
+#editor table { border-collapse:collapse; width:100%; margin:0.8em 0 }
+#editor td, #editor th { border:1px solid var(--b1); padding:6px 10px; font-size:15px }
+#editor th { font-weight:600; background:var(--glass-1) }
 
 /* Empty state — absolute fill of editor-area, above escroll */
 .empty-state {
@@ -1043,8 +1059,18 @@ const escA = s => String(s||'').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function getPlain() {
-  const w = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
-  let t = '', n; while ((n = w.nextNode())) t += n.textContent; return t;
+  // Walk DOM preserving paragraph/heading boundaries as \n\n
+  const BLOCK = new Set(['P','H1','H2','H3','H4','H5','H6','DIV','LI','BLOCKQUOTE','PRE','TR']);
+  function walk(node) {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+    if (node.nodeName === 'BR') return '\n';
+    const parts = [];
+    for (const c of node.childNodes) parts.push(walk(c));
+    const text = parts.join('');
+    // Add double newline after block elements
+    return BLOCK.has(node.nodeName) ? text + '\n\n' : text;
+  }
+  return walk(editor).replace(/\n{3,}/g, '\n\n').replace(/^\n+|\n+$/g, '');
 }
 
 function setStatus(msg, busy = false) {
@@ -1276,7 +1302,17 @@ function applyHighlights(items) {
 }
 function updateNavCt(){navCt.textContent=`${hlIdx+1}/${hlItems.length}`;getPB().querySelectorAll('.sug').forEach((s,i)=>s.classList.toggle('active-sug',i===hlIdx));const ac=getPB().querySelector('.active-sug');if(ac)ac.scrollIntoView({behavior:'smooth',block:'nearest'});}
 function navTo(idx){const spans=[...editor.querySelectorAll('.hl')];if(!spans.length)return;hlIdx=Math.max(0,Math.min(idx,spans.length-1));updateNavCt();const sp=spans[hlIdx];sp.scrollIntoView({behavior:'smooth',block:'center'});showTT(sp);sp.classList.remove('pulse');requestAnimationFrame(()=>sp.classList.add('pulse'));}
-function clearHl(silent=false){editor.textContent=getPlain();hlItems=[];hlIdx=0;hlPill.classList.remove('on');applyAllB.classList.remove('on');sugNav.classList.remove('on');hideTT();if(!silent)setStatus('Ready to forge.');}
+function clearHl(silent=false) {
+  // Remove only highlight/find spans — preserve all other HTML structure
+  editor.querySelectorAll('.hl, .fr-match').forEach(sp => {
+    sp.replaceWith(document.createTextNode(sp.textContent));
+  });
+  editor.normalize();
+  hlItems=[]; hlIdx=0;
+  hlPill.classList.remove('on'); applyAllB.classList.remove('on'); sugNav.classList.remove('on');
+  hideTT();
+  if(!silent) setStatus('Ready to forge.');
+}
 function applyAllHl(){editor.querySelectorAll('.hl').forEach(sp=>sp.replaceWith(document.createTextNode(sp.dataset.sug||sp.textContent)));editor.normalize();hlItems=[];hlIdx=0;hlPill.classList.remove('on');applyAllB.classList.remove('on');sugNav.classList.remove('on');hideTT();updateStats();toast('✓ All suggestions applied');successPanel('Applied','✓','✅','All Applied','Every suggestion has been applied.','var(--c-fact)');}
 window.focusHl=function(orig,idx){const spans=[...editor.querySelectorAll('.hl')];const i=idx!==undefined?idx:spans.findIndex(s=>s.dataset.orig===orig);if(i!==-1)navTo(i);};
 window.applyAllHl=applyAllHl;
@@ -1335,23 +1371,64 @@ function setWT(){const v=parseInt(document.getElementById('wt-inp').value);if(v>
 function clearWT(){wordTarget=0;document.getElementById('wt-inp').value='';document.getElementById('wt-pop').classList.remove('open');document.getElementById('wt-fill').style.width='0%';document.getElementById('wt-lbl').textContent='Words';toast('Word goal cleared');}
 
 /* ══════════════════════════════════
-   DOCX EXPORT
+   DOCX EXPORT — DOM-based, structure-preserving
+   Walks editor HTML tree. No heuristics.
 ══════════════════════════════════ */
 function xmlEsc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function isHeading(line){const t=line.trim();if(!t||t.length>90)return false;return /^[A-Z0-9"]/.test(t)&&!/[.!?,;]$/.test(t)&&t.split(/\s+/).length<=12&&t.length>=3;}
-function parseRuns(text){const runs=[];const re=/(\*\*([^*]+?)\*\*|\*([^*]+?)\*|_([^_]+?)_)/g;let last=0,m;while((m=re.exec(text))!==null){if(m.index>last)runs.push({text:text.slice(last,m.index),b:false,i:false});if(m[2])runs.push({text:m[2],b:true,i:false});else if(m[3])runs.push({text:m[3],b:false,i:true});else if(m[4])runs.push({text:m[4],b:false,i:true});last=m.index+m[0].length;}if(last<text.length)runs.push({text:text.slice(last),b:false,i:false});return runs.filter(r=>r.text);}
-function makeRun(text,bold,italic,pts){const b=bold?'<w:b/><w:bCs/>':'';const ii=italic?'<w:i/><w:iCs/>':'';return `<w:r><w:rPr><w:rFonts w:ascii="Open Sans" w:hAnsi="Open Sans" w:cs="Open Sans"/>${b}${ii}<w:sz w:val="${pts}"/><w:szCs w:val="${pts}"/><w:color w:val="000000"/></w:rPr><w:t xml:space="preserve">${xmlEsc(text)}</w:t></w:r>`;}
 
-function buildDocXml(text){
-  const paras=text.split(/\n\n+/).filter(p=>p.trim());let body='';
-  for(const para of paras){const lines=para.split(/\n/).filter(l=>l.trim());for(const line of lines){const t=line.trim();if(!t)continue;const h=isHeading(t);const pts=h?28:24;const sp=h?'<w:spacing w:before="280" w:after="120" w:line="300" w:lineRule="auto"/>':'<w:spacing w:after="160" w:line="276" w:lineRule="auto"/>';const runs=parseRuns(t);const rs=runs.map(r=>makeRun(r.text,r.b||h,r.i,pts)).join('');body+=`<w:p><w:pPr>${sp}<w:jc w:val="${h?'left':'both'}"/></w:pPr>${rs}</w:p>`;}}
-  body+=`<w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t></w:t></w:r></w:p>`;
+function domToRuns(node,pts,ib,ii){
+  if(node.nodeType===Node.TEXT_NODE){const t=node.textContent;if(!t)return '';const b=ib?'<w:b/><w:bCs/>':'';const i=ii?'<w:i/><w:iCs/>':'';return `<w:r><w:rPr><w:rFonts w:ascii="Open Sans" w:hAnsi="Open Sans" w:cs="Open Sans"/>${b}${i}<w:sz w:val="${pts}"/><w:szCs w:val="${pts}"/><w:color w:val="000000"/></w:rPr><w:t xml:space="preserve">${xmlEsc(t)}</w:t></w:r>`;}
+  if(node.nodeName==='BR')return '<w:r><w:br/></w:r>';
+  const bold=ib||['STRONG','B'].includes(node.nodeName);
+  const ital=ii||['EM','I'].includes(node.nodeName);
+  let o='';for(const c of node.childNodes)o+=domToRuns(c,pts,bold,ital);return o;
+}
+
+function domNodeToOoxml(container){
+  let body='';
+  for(const node of container.childNodes){
+    if(node.nodeType===Node.TEXT_NODE){
+      const t=node.textContent.trim();if(!t)continue;
+      body+=`<w:p><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/><w:jc w:val="both"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Open Sans" w:hAnsi="Open Sans" w:cs="Open Sans"/><w:sz w:val="24"/><w:szCs w:val="24"/><w:color w:val="000000"/></w:rPr><w:t xml:space="preserve">${xmlEsc(node.textContent)}</w:t></w:r></w:p>`;
+      continue;
+    }
+    if(node.nodeType!==Node.ELEMENT_NODE)continue;
+    const tag=node.nodeName;
+    // Skip pure markup spans (highlights, find marks)
+    if(node.classList?.contains('hl')||node.classList?.contains('fr-match')){
+      const t=node.textContent.trim();if(!t)continue;
+      body+=`<w:p><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/><w:jc w:val="both"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Open Sans" w:hAnsi="Open Sans" w:cs="Open Sans"/><w:sz w:val="24"/><w:szCs w:val="24"/><w:color w:val="000000"/></w:rPr><w:t xml:space="preserve">${xmlEsc(t)}</w:t></w:r></w:p>`;
+      continue;
+    }
+    if(tag==='H1'){const r=domToRuns(node,32,true,false);if(r)body+=`<w:p><w:pPr><w:spacing w:before="360" w:after="180" w:line="320" w:lineRule="auto"/><w:jc w:val="left"/></w:pPr>${r}</w:p>`;}
+    else if(tag==='H2'){const r=domToRuns(node,28,true,false);if(r)body+=`<w:p><w:pPr><w:spacing w:before="300" w:after="160" w:line="300" w:lineRule="auto"/><w:jc w:val="left"/></w:pPr>${r}</w:p>`;}
+    else if(tag==='H3'){const r=domToRuns(node,26,true,false);if(r)body+=`<w:p><w:pPr><w:spacing w:before="240" w:after="120" w:line="284" w:lineRule="auto"/><w:jc w:val="left"/></w:pPr>${r}</w:p>`;}
+    else if(tag==='H4'){const r=domToRuns(node,24,true,false);if(r)body+=`<w:p><w:pPr><w:spacing w:before="200" w:after="100" w:line="276" w:lineRule="auto"/><w:jc w:val="left"/></w:pPr>${r}</w:p>`;}
+    else if(tag==='P'){const r=domToRuns(node,24,false,false);if(r)body+=`<w:p><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/><w:jc w:val="both"/></w:pPr>${r}</w:p>`;}
+    else if(tag==='BLOCKQUOTE'){const r=domToRuns(node,24,false,true);if(r)body+=`<w:p><w:pPr><w:ind w:left="720" w:right="720"/><w:spacing w:after="160" w:line="276" w:lineRule="auto"/></w:pPr>${r}</w:p>`;}
+    else if(tag==='LI'){const r=domToRuns(node,24,false,false);if(r)body+=`<w:p><w:pPr><w:ind w:left="720" w:hanging="360"/><w:spacing w:after="120" w:line="276" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Open Sans" w:hAnsi="Open Sans" w:cs="Open Sans"/><w:sz w:val="24"/><w:szCs w:val="24"/><w:color w:val="000000"/></w:rPr><w:t xml:space="preserve">• </w:t></w:r>${r}</w:p>`;}
+    else if(tag==='UL'||tag==='OL'){body+=domNodeToOoxml(node);}
+    else if(['DIV','SECTION','ARTICLE','HEADER','FOOTER','MAIN'].includes(tag)){body+=domNodeToOoxml(node);}
+    else if(tag==='TABLE'){
+      let tbl='<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders></w:tblPr>';
+      node.querySelectorAll('tr').forEach(tr=>{tbl+='<w:tr>';tr.querySelectorAll('td,th').forEach(td=>{const r=domToRuns(td,24,td.nodeName==='TH',false);tbl+=`<w:tc><w:p><w:pPr><w:spacing w:after="60"/></w:pPr>${r||'<w:r><w:t></w:t></w:r>'}</w:p></w:tc>`;});tbl+='</w:tr>';});
+      tbl+='</w:tbl><w:p/>';body+=tbl;
+    }
+    else{const r=domToRuns(node,24,false,false);if(r)body+=`<w:p><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/><w:jc w:val="both"/></w:pPr>${r}</w:p>`;}
+  }
+  return body;
+}
+
+function buildDocXml(){
+  let body=domNodeToOoxml(editor);
+  if(!body)body='<w:p><w:r><w:t></w:t></w:r></w:p>';
+  body+='<w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t></w:t></w:r></w:p>';
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`;
 }
 function buildStylesXml(){return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Open Sans" w:hAnsi="Open Sans" w:cs="Open Sans"/><w:sz w:val="24"/><w:szCs w:val="24"/><w:color w:val="000000"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/><w:jc w:val="both"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Open Sans" w:hAnsi="Open Sans" w:cs="Open Sans"/><w:sz w:val="24"/><w:szCs w:val="24"/><w:color w:val="000000"/></w:rPr></w:style></w:styles>`;}
 
 async function exportDocx(){
-  const text=getPlain().trim();if(!text){toast('Editor is empty');return;}
+  if(!editor.textContent.trim()){toast('Editor is empty');return;}
   if(typeof JSZip==='undefined'){toast('JSZip not loaded — check your connection');return;}
   setStatus('Generating .docx…',true);
   try{
@@ -1359,15 +1436,17 @@ async function exportDocx(){
     zip.file('[Content_Types].xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>`);
     zip.folder('_rels').file('.rels',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`);
     const word=zip.folder('word');
-    word.file('document.xml',buildDocXml(text));
+    word.file('document.xml',buildDocXml());
     word.file('styles.xml',buildStylesXml());
-    word.file('settings.xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:defaultTabStop w:val="720"/><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>`);
+    word.file('settings.xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:defaultTabStop w:val="720"/></w:settings>`);
     word.folder('_rels').file('document.xml.rels',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>`);
     const blob=await zip.generateAsync({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
     const url=URL.createObjectURL(blob);const a=document.createElement('a');const ts=new Date().toISOString().slice(0,10);a.href=url;a.download=`forge-${ts}.docx`;document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(()=>URL.revokeObjectURL(url),5000);
-    setStatus('Export complete.');toast('✓ Downloaded forge-'+new Date().toISOString().slice(0,10)+'.docx');
-  }catch(e){setStatus('Export failed: '+e.message);toast('Export error');}
+    setStatus('Export complete.');toast('✓ Downloaded .docx');
+  }catch(e){setStatus('Export failed: '+e.message);toast('Export error: '+e.message);console.error(e);}
 }
+
+
 
 /* ══════════════════════════════════
    TOOLS
@@ -1492,22 +1571,176 @@ function doRead(){
 }
 
 /* ══════════════════════════════════
-   FILE HANDLING
+   FILE HANDLING — structure-preserving
 ══════════════════════════════════ */
-async function handleFile(file){
-  if(!file)return;const name=file.name.toLowerCase();
-  if(!name.endsWith('.pdf')&&!name.endsWith('.docx')){setStatus('Only .docx and .pdf supported.');toast('Only .docx and .pdf');return;}
-  const fp=document.getElementById('fprog'),fb=document.getElementById('fpbar');
-  const setP=p=>{fb.style.width=p+'%'};fp.classList.add('on');setP(5);setStatus(`Loading ${file.name}…`,true);
-  try{
-    let text='';
-    if(name.endsWith('.pdf')){if(typeof pdfjsLib==='undefined')throw new Error('PDF library not loaded — refresh page.');const buf=await file.arrayBuffer();const pdf=await pdfjsLib.getDocument({data:buf}).promise;for(let i=1;i<=pdf.numPages;i++){const pg=await pdf.getPage(i);const tc=await pg.getTextContent();text+=tc.items.map(s=>s.str).join(' ')+'\n\n';setP(5+Math.round((i/pdf.numPages)*88));}}
-    else{if(typeof mammoth==='undefined')throw new Error('DOCX library not loaded — refresh page.');setP(40);const buf=await file.arrayBuffer();const res=await mammoth.extractRawText({arrayBuffer:buf});text=res.value;setP(92);}
-    if(!text.trim())throw new Error('File appears empty or could not be read.');
-    clearHl(true);editor.textContent=text.trim();updateStats();cache.clear();undoStack.push(text.trim());syncUndoBtns();
-    setP(100);setTimeout(()=>{fp.classList.remove('on');setP(0);},600);
-    setStatus(`✓ Loaded: ${file.name}`);toast(`✓ ${file.name}`);
-  }catch(err){fp.classList.remove('on');setP(0);setStatus(`Error: ${err.message}`);toast('Error loading file');}
+
+/* Clean HTML from mammoth — remove unwanted attributes, normalize tags */
+function cleanImportedHtml(html) {
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  // Remove all style/class/id attributes
+  div.querySelectorAll('*').forEach(el => {
+    el.removeAttribute('style');
+    el.removeAttribute('class');
+    el.removeAttribute('id');
+    // Convert unsupported tags to sensible equivalents
+    if (el.nodeName === 'SPAN') {
+      el.replaceWith(...el.childNodes);
+    }
+  });
+  // Remove empty paragraphs that are just whitespace
+  div.querySelectorAll('p').forEach(p => {
+    if (!p.textContent.trim()) p.remove();
+  });
+  return div.innerHTML;
+}
+
+/* PDF paragraph reconstruction using y-coordinate analysis */
+async function pdfToHtml(arrayBuffer, onProgress) {
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const allParas = [];
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const tc   = await page.getTextContent();
+    const vp   = page.getViewport({ scale: 1 });
+    const pageH = vp.height;
+
+    if (!tc.items.length) { onProgress(pageNum, pdf.numPages); continue; }
+
+    // Group items into lines by y-position (items within 3px = same line)
+    const lines = [];
+    let curY = null, curLine = [];
+    const sorted = [...tc.items].sort((a, b) => {
+      const ay = pageH - a.transform[5];
+      const by = pageH - b.transform[5];
+      return ay !== by ? ay - by : a.transform[4] - b.transform[4];
+    });
+    for (const item of sorted) {
+      const y = Math.round(pageH - item.transform[5]);
+      if (curY === null || Math.abs(y - curY) > 4) {
+        if (curLine.length) lines.push({ y: curY, items: curLine });
+        curLine = [item];
+        curY = y;
+      } else {
+        curLine.push(item);
+      }
+    }
+    if (curLine.length) lines.push({ y: curY, items: curLine });
+
+    if (!lines.length) { onProgress(pageNum, pdf.numPages); continue; }
+
+    // Compute median line gap to detect paragraph breaks
+    const gaps = [];
+    for (let i = 1; i < lines.length; i++) gaps.push(lines[i].y - lines[i-1].y);
+    const medianGap = gaps.length
+      ? [...gaps].sort((a,b) => a-b)[Math.floor(gaps.length/2)]
+      : 14;
+    const paraThreshold = medianGap * 1.8;
+
+    // Estimate average font size to detect headings
+    const fontSizes = tc.items.map(it => Math.abs(it.transform[3])).filter(s => s > 0);
+    const avgFontSize = fontSizes.length
+      ? fontSizes.reduce((a,b) => a+b, 0) / fontSizes.length
+      : 12;
+
+    // Group lines into paragraphs
+    let paraLines = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const lineText = line.items.map(it => it.str).join(' ').trim();
+      if (!lineText) continue;
+      const lineFont = Math.abs(line.items[0]?.transform?.[3] || avgFontSize);
+      const gap = i > 0 ? line.y - lines[i-1].y : 0;
+      // New paragraph if large gap OR this line is significantly larger font (heading)
+      if (paraLines.length && (gap > paraThreshold || lineFont > avgFontSize * 1.25)) {
+        allParas.push({ lines: paraLines, font: Math.abs(paraLines[0]?.items?.[0]?.transform?.[3] || avgFontSize) });
+        paraLines = [];
+      }
+      paraLines.push(line);
+    }
+    if (paraLines.length) allParas.push({ lines: paraLines, font: Math.abs(paraLines[0]?.items?.[0]?.transform?.[3] || avgFontSize) });
+    onProgress(pageNum, pdf.numPages);
+  }
+
+  // Determine heading threshold: paragraphs with font > 1.2x average body font
+  const bodyFonts = allParas.map(p => p.font).filter(f => f > 0);
+  const avgBody = bodyFonts.length ? bodyFonts.reduce((a,b)=>a+b,0)/bodyFonts.length : 12;
+
+  // Build HTML
+  let html = '';
+  for (const para of allParas) {
+    const text = para.lines.map(l => l.items.map(it => it.str).join(' ').trim()).join(' ').trim();
+    if (!text) continue;
+    if (para.font > avgBody * 1.25) {
+      html += `<h2>${escHtml(text)}</h2>`;
+    } else {
+      html += `<p>${escHtml(text)}</p>`;
+    }
+  }
+  return html || '<p>(No text content found in PDF)</p>';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function handleFile(file) {
+  if (!file) return;
+  const name = file.name.toLowerCase();
+  if (!name.endsWith('.pdf') && !name.endsWith('.docx')) {
+    setStatus('Only .docx and .pdf supported.'); toast('Only .docx and .pdf'); return;
+  }
+  const fp = document.getElementById('fprog'), fb = document.getElementById('fpbar');
+  const setP = p => { fb.style.width = p + '%' };
+  fp.classList.add('on'); setP(5); setStatus(`Loading ${file.name}…`, true);
+  try {
+    let html = '';
+    const buf = await file.arrayBuffer();
+
+    if (name.endsWith('.pdf')) {
+      if (typeof pdfjsLib === 'undefined') throw new Error('PDF library not loaded — refresh page.');
+      html = await pdfToHtml(buf, (cur, total) => setP(5 + Math.round((cur/total)*88)));
+
+    } else {
+      // DOCX — use convertToHtml to preserve headings, bold, italic, lists
+      if (typeof mammoth === 'undefined') throw new Error('DOCX library not loaded — refresh page.');
+      setP(40);
+      const result = await mammoth.convertToHtml({ arrayBuffer: buf }, {
+        styleMap: [
+          "p[style-name='Heading 1'] => h1:fresh",
+          "p[style-name='Heading 2'] => h2:fresh",
+          "p[style-name='Heading 3'] => h3:fresh",
+          "p[style-name='Heading 4'] => h4:fresh",
+          "p[style-name='Title']     => h1:fresh",
+          "p[style-name='Subtitle']  => h2:fresh",
+          "b => strong",
+          "i => em",
+        ]
+      });
+      html = cleanImportedHtml(result.value);
+      setP(92);
+    }
+
+    if (!html.trim()) throw new Error('File appears empty or could not be read.');
+
+    // Inject structured HTML into editor
+    clearHl(true);
+    editor.innerHTML = html;
+    updateStats();
+    cache.clear();
+    undoStack.push(html);
+    syncUndoBtns();
+    setP(100);
+    setTimeout(() => { fp.classList.remove('on'); setP(0); }, 600);
+    setStatus(`✓ Loaded: ${file.name}`);
+    toast(`✓ ${file.name}`);
+
+  } catch (err) {
+    fp.classList.remove('on'); setP(0);
+    setStatus(`Error: ${err.message}`);
+    toast('Error loading file: ' + err.message);
+  }
 }
 
 /* ══════════════════════════════════
@@ -1566,7 +1799,27 @@ document.addEventListener('drop', e => { e.preventDefault(); dc=0; dropOv.classL
 
 /* Editor */
 editor.addEventListener('input', () => { updateStats(); pushHist(); });
-editor.addEventListener('paste', e => { e.preventDefault(); document.execCommand('insertText', false, (e.clipboardData||window.clipboardData).getData('text/plain')); });
+editor.addEventListener('paste', e => {
+  e.preventDefault();
+  const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+  if (!text) return;
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  range.deleteContents();
+  const lines = text.split('\n');
+  const frag = document.createDocumentFragment();
+  lines.forEach((line, i) => {
+    frag.appendChild(document.createTextNode(line));
+    if (i < lines.length - 1) frag.appendChild(document.createElement('br'));
+  });
+  range.insertNode(frag);
+  range.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(range);
+  updateStats();
+  pushHist();
+});
 editor.addEventListener('click', e => { const h=e.target.closest('.hl'); if(h){const i=parseInt(h.dataset.i||'0');hlIdx=i;updateNavCt();showTT(h);e.stopPropagation();}else hideTT(); });
 document.addEventListener('click', e => { if(!tt.contains(e.target)&&!e.target.closest('.hl')) hideTT(); });
 
